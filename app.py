@@ -179,7 +179,10 @@ if results:
         msg += f" {incompletos_count} con algún campo faltante."
     if fallidos_count:
         msg += f" {fallidos_count} sin datos."
-    st.success(msg) if fallidos_count == 0 else st.warning(msg)
+    if fallidos_count == 0:
+        st.success(msg)
+    else:
+        st.warning(msg)
 
     st.subheader("Vista previa")
     for r in results:
