@@ -302,6 +302,49 @@ def _new_context(browser, region: dict = None, url: str = ""):
     return context
 
 
+def diagnostico_pagina(url: str, timeout_ms: int = 25000) -> dict:
+    """Abre el link con el navegador automatizado y devuelve el HTML final
+    completo + una captura de pantalla, SIN intentar extraer nada. Sirve para
+    diagnosticar por qué un link no trae precio/talla/color: se descarga el
+    HTML real de la página para poder revisar cómo está armada exactamente
+    (nombres de clase, estructura JSON, etc.) y ajustar el scraper con datos
+    reales en vez de adivinar."""
+    from playwright.sync_api import sync_playwright
+
+    info = {"ok": False, "html": "", "screenshot": b"", "final_url": url, "error": ""}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = _new_context(browser, region=REGIONS[0], url=url)
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(2500)
+                for text in CONTINUE_BUTTON_TEXTS:
+                    try:
+                        locator = page.get_by_text(text, exact=False)
+                        if locator.count() > 0:
+                            locator.first.click(timeout=1500)
+                            page.wait_for_timeout(1200)
+                            break
+                    except Exception:
+                        continue
+                info["final_url"] = page.url
+                info["html"] = page.content()
+                info["screenshot"] = page.screenshot(full_page=True)
+                info["ok"] = True
+            except Exception as exc:
+                info["error"] = str(exc)
+            finally:
+                page.close()
+            browser.close()
+    except Exception as exc:
+        info["error"] = str(exc)
+
+    return info
+
+
 def fetch_product_playwright(url: str, timeout_ms: int = 25000) -> ProductResult:
     """Extrae un producto probando distintas regiones (EE.UU., Venezuela) con
     el navegador automatizado, combinando los campos que cada intento logre

@@ -43,6 +43,57 @@ with st.expander("⚠️ Aviso importante", expanded=False):
         "con navegador (ver README) para casos difíciles."
     )
 
+with st.expander("🔧 Modo diagnóstico (si el precio/talla/color no salen)", expanded=False):
+    st.write(
+        "Pega **un solo link real** de producto (no de compartir) y descarga el HTML "
+        "y una captura de esa página tal como las ve el navegador automatizado. "
+        "Sube esos archivos de vuelta en el chat para que se pueda ajustar el "
+        "código con la estructura real de la página, en vez de adivinar."
+    )
+    diag_url = st.text_input("Link para diagnosticar", key="diag_url")
+    if st.button("📥 Descargar HTML + captura de esta página"):
+        if not diag_url.strip():
+            st.warning("Pega un link primero.")
+        else:
+            try:
+                from playwright_scraper import diagnostico_pagina
+            except ImportError:
+                st.error("Falta Playwright instalado (revisa requirements.txt).")
+                diagnostico_pagina = None
+
+            if diagnostico_pagina:
+                with st.spinner("Preparando navegador y cargando la página..."):
+                    ok, err = ensure_playwright_browser()
+                if not ok:
+                    st.error(f"No se pudo preparar el navegador: {err}")
+                else:
+                    with st.spinner("Cargando página y generando diagnóstico..."):
+                        info = diagnostico_pagina(diag_url.strip())
+                    if not info["ok"]:
+                        st.error(f"No se pudo cargar la página: {info['error']}")
+                    else:
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w") as zf:
+                            zf.writestr("pagina.html", info["html"])
+                            zf.writestr("captura.png", info["screenshot"])
+                            zf.writestr(
+                                "info.txt",
+                                f"URL original: {diag_url}\nURL final: {info['final_url']}\n",
+                            )
+                        st.success(
+                            f"Listo. URL final resuelta: {info['final_url']}"
+                        )
+                        st.download_button(
+                            "⬇️ Descargar diagnóstico.zip",
+                            data=zip_buffer.getvalue(),
+                            file_name="diagnostico_shein.zip",
+                            mime="application/zip",
+                        )
+                        st.caption(
+                            "Sube 'diagnostico_shein.zip' (o solo captura.png / pagina.html) "
+                            "aquí en el chat para que se pueda revisar la estructura real."
+                        )
+
 default_placeholder = "https://www.shein.com/...-p-12345678.html\nhttps://www.shein.com/...-p-87654321.html"
 links_text = st.text_area("Links de producto", height=180, placeholder=default_placeholder)
 
