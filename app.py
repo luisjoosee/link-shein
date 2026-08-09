@@ -161,6 +161,7 @@ if results:
                 "Nombre": r.nombre,
                 "Precio": r.precio,
                 "Tallas": r.tallas,
+                "Color": r.color,
                 "Serial/SKU": r.serial,
                 "Foto (URL)": r.foto_url,
                 "Link": r.link,
@@ -199,7 +200,8 @@ if results:
             with c2:
                 st.markdown(f"**{r.nombre or '(sin nombre)'}**")
                 st.write(f"💲 Precio: {r.precio or '—'}")
-                st.write(f"📏 Tallas: {r.tallas or '—'}")
+                st.write(f"📏 Talla: {r.tallas or '—'}")
+                st.write(f"🎨 Color: {r.color or '—'}")
                 st.write(f"🔢 Serial/SKU: {r.serial or '—'}")
                 st.write(f"🔗 [Ver producto]({r.link})")
                 if r.estado != "ok":

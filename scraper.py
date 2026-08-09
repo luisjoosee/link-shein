@@ -68,6 +68,7 @@ class ProductResult:
     nombre: str = ""
     precio: str = ""
     tallas: str = ""
+    color: str = ""
     serial: str = ""
     foto_url: str = ""
     estado: str = "ok"
@@ -84,7 +85,7 @@ def merge_into(base: "ProductResult", extra: "ProductResult") -> "ProductResult"
     """Completa los campos vacíos de `base` usando los valores de `extra`,
     sin pisar los que `base` ya tenía. Útil para combinar el resultado del
     modo rápido con un reintento (otra región, o navegador automatizado)."""
-    for f in CORE_FIELDS + ["tallas"]:
+    for f in CORE_FIELDS + ["tallas", "color"]:
         if not getattr(base, f) and getattr(extra, f):
             setattr(base, f, getattr(extra, f))
 
@@ -202,19 +203,31 @@ def _from_embedded_json(html: str) -> dict:
         "nombre": r'"goods_name"\s*:\s*"([^"]+)"',
         "serial": r'"goods_sn"\s*:\s*"([^"]+)"',
         "foto_url": r'"goods_img"\s*:\s*"([^"]+)"',
-        "precio_sale": r'"salePrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
-        "precio_retail": r'"retailPrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
     }
     for key, pattern in patterns.items():
         m = re.search(pattern, html)
         if m:
             data[key] = m.group(1)
 
-    if "precio_sale" in data:
-        data["precio"] = data.pop("precio_sale")
-        data.pop("precio_retail", None)
-    elif "precio_retail" in data:
-        data["precio"] = data.pop("precio_retail")
+    # Precio: probamos varios nombres de clave posibles, del más específico
+    # al más genérico, porque los sitios tipo Shein cambian esta estructura
+    # seguido. Nos quedamos con el primero que encuentre algo.
+    precio_patterns = [
+        r'"salePrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        r'"specialPrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        r'"discountPrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        r'"retailPrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        r'"(?:price|unitPrice|displayPrice|suggestedSalePrice)"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        # último recurso: cualquier "amountWithSymbol" que aparezca en la página
+        r'"amountWithSymbol"\s*:\s*"([^"]+)"',
+        # variante sin "WithSymbol", combinada con el código de moneda aparte
+        r'"salePrice"\s*:\s*\{[^}]*?"amount"\s*:\s*"?([\d.]+)"?',
+    ]
+    for pattern in precio_patterns:
+        m = re.search(pattern, html)
+        if m:
+            data["precio"] = m.group(1)
+            break
 
     tallas = sorted(set(re.findall(r'"attr_value_name"\s*:\s*"([^"]+)"', html)))
     # Filtra ruidos comunes que no son tallas (colores, etc. se cuelan a veces)

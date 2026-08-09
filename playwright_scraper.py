@@ -93,6 +93,72 @@ def _search_json_recursive(obj, found=None):
     return found
 
 
+# JavaScript que corre DENTRO de la página ya cargada para leer directamente
+# lo que se ve en pantalla: el precio mostrado, y la talla/color que están
+# marcados como seleccionados (los que corresponden exactamente a como se
+# abrió el link). Es más confiable que adivinar por el JSON interno, porque
+# lee lo mismo que vería una persona.
+_DOM_EXTRACT_JS = r"""
+() => {
+  function textOf(el) {
+    return (el && (el.innerText || el.textContent) || "").trim();
+  }
+
+  function looksLikePrice(text) {
+    return /[$€£]\s?\d/.test(text) || /\d+[.,]\d{2}/.test(text);
+  }
+
+  function findPrice() {
+    const candidates = Array.from(
+      document.querySelectorAll('[class*="price" i], [class*="Price"]')
+    );
+    for (const el of candidates) {
+      const text = textOf(el);
+      if (text && looksLikePrice(text) && text.length < 40) {
+        return text;
+      }
+    }
+    return "";
+  }
+
+  function findSelectedAttribute(keywords) {
+    const all = Array.from(document.querySelectorAll("*"));
+    for (const el of all) {
+      const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+      const ariaSelected = el.getAttribute && el.getAttribute("aria-selected") === "true";
+      const ariaChecked = el.getAttribute && el.getAttribute("aria-checked") === "true";
+      const looksSelected =
+        /selected|active|checked|current/.test(cls) || ariaSelected || ariaChecked;
+      if (!looksSelected) continue;
+
+      let node = el;
+      for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
+        const nodeCls = typeof node.className === "string" ? node.className.toLowerCase() : "";
+        let attrsText = "";
+        if (node.attributes) {
+          for (const a of node.attributes) {
+            attrsText += " " + a.name.toLowerCase() + "=" + String(a.value).toLowerCase();
+          }
+        }
+        const haystack = nodeCls + attrsText;
+        if (keywords.some((k) => haystack.includes(k))) {
+          const text = textOf(el);
+          if (text && text.length < 40) return text;
+        }
+      }
+    }
+    return "";
+  }
+
+  return {
+    precio_dom: findPrice(),
+    talla_dom: findSelectedAttribute(["size", "talla"]),
+    color_dom: findSelectedAttribute(["color", "colour", "colo"]),
+  };
+}
+"""
+
+
 def _extract_from_page(context, url: str, timeout_ms: int) -> ProductResult:
     """Abre una pestaña nueva en un contexto de navegador YA ABIERTO y extrae
     los datos del producto. No abre ni cierra el navegador (eso lo hace quien
@@ -112,6 +178,7 @@ def _extract_from_page(context, url: str, timeout_ms: int) -> ProductResult:
 
     page.on("response", handle_response)
 
+    dom_fields = {}
     try:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -131,6 +198,13 @@ def _extract_from_page(context, url: str, timeout_ms: int) -> ProductResult:
                     break
             except Exception:
                 continue
+
+        # Leemos directamente lo que se ve en pantalla (precio, talla y color
+        # ya seleccionados). Esto se hace ANTES de leer el HTML "congelado".
+        try:
+            dom_fields = page.evaluate(_DOM_EXTRACT_JS) or {}
+        except Exception:
+            dom_fields = {}
 
         final_url = page.url
         html = page.content()
@@ -165,6 +239,15 @@ def _extract_from_page(context, url: str, timeout_ms: int) -> ProductResult:
     result.tallas = merged.get("tallas", "")
     result.serial = merged.get("serial", "")
     result.foto_url = merged.get("foto_url", "")
+
+    # Lo leído directamente en pantalla (DOM) tiene prioridad, porque refleja
+    # exactamente lo seleccionado en el link, no una lista genérica de opciones.
+    if dom_fields.get("precio_dom"):
+        result.precio = dom_fields["precio_dom"]
+    if dom_fields.get("talla_dom"):
+        result.tallas = dom_fields["talla_dom"]
+    if dom_fields.get("color_dom"):
+        result.color = dom_fields["color_dom"]
 
     if not any([result.nombre, result.precio, result.foto_url]):
         result.estado = "sin_datos"

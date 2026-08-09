@@ -194,6 +194,31 @@ y extraiga la lista completa de productos que contiene, no solo uno.
 
 ---
 
+## 8. Precio, talla y color exactos (según lo seleccionado en el link)
+
+Se agregaron dos mejoras para esto:
+
+1. **Más patrones de búsqueda de precio** en el modo rápido (por si Shein usa
+   distintos nombres de campo internamente).
+2. **Lectura directa de lo que se ve en pantalla** en el modo navegador: en vez
+   de adivinar por el JSON interno, el navegador automatizado ahora lee el
+   precio, la talla y el color **tal como aparecen ya seleccionados** al abrir
+   el link — igual que los vería una persona. Este método tiene prioridad
+   sobre cualquier otro dato encontrado.
+
+Por esto, si el precio/talla/color no salen en modo rápido, es normal: usa el
+modo **⚡ Automático** o **🐢 Forzar navegador**, que son los que pueden leer la
+pantalla ya renderizada.
+
+### Si el precio sigue sin aparecer después de esto
+Sería señal de que Shein cambió su estructura de nuevo, o que en tu caso
+particular el precio se muestra con una clase/estructura distinta a las que
+busca el código. Si me compartes uno de esos links donde falla (uno real, no
+de compartir), puedo revisar y ajustar los selectores específicos para que
+coincidan exactamente con lo que trae esa página.
+
+---
+
 ## Estructura del proyecto
 
 ```
