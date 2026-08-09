@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from scraper import batch_scrape, is_shein_url
+from scraper import batch_scrape, is_shein_url, merge_into
 
 st.set_page_config(page_title="Extractor de productos Shein", page_icon="🛍️", layout="wide")
 
@@ -46,10 +46,15 @@ with st.expander("⚠️ Aviso importante", expanded=False):
 default_placeholder = "https://www.shein.com/...-p-12345678.html\nhttps://www.shein.com/...-p-87654321.html"
 links_text = st.text_area("Links de producto", height=180, placeholder=default_placeholder)
 
-usar_navegador = st.checkbox(
-    "🐢 Usar navegador automatizado (más lento, pero necesario para links de "
-    "'compartir', 'onelink.shein.com' o carritos compartidos)",
-    value=False,
+usar_navegador = st.radio(
+    "Modo de extracción",
+    options=["automatico", "rapido", "navegador"],
+    format_func=lambda x: {
+        "automatico": "⚡ Automático (recomendado): rápido primero, navegador solo si hace falta",
+        "rapido": "🚀 Solo modo rápido (no funciona con links de compartir/onelink/carrito)",
+        "navegador": "🐢 Forzar navegador para todos (más lento, útil para carritos)",
+    }[x],
+    index=0,
 )
 
 col1, col2 = st.columns([1, 5])
@@ -74,40 +79,77 @@ if run:
             )
 
         progress = st.progress(0, text="Iniciando...")
-        results = []
-        import time, random
-        from scraper import fetch_product
 
-        if usar_navegador:
+        def necesita_navegador():
             try:
+                from playwright_scraper import batch_scrape_playwright  # noqa: F401
+                return True
+            except ImportError:
+                return False
+
+        if usar_navegador == "rapido":
+            progress.progress(0.2, text="Extrayendo (modo rápido, en paralelo)...")
+            results = batch_scrape(urls)
+            progress.progress(1.0, text="¡Listo!")
+
+        elif usar_navegador == "navegador":
+            if not necesita_navegador():
+                st.error(
+                    "El modo navegador necesita Playwright instalado (revisa requirements.txt)."
+                )
+                results = []
+            else:
                 with st.spinner("Preparando navegador automatizado (solo la primera vez, puede tardar 1-2 min)..."):
                     ok, err = ensure_playwright_browser()
                 if not ok:
                     st.error(
                         f"No se pudo preparar el navegador automatizado en este servidor: {err}\n\n"
-                        "Este modo funciona de forma más confiable corriendo la app en tu propia PC "
-                        "(ver README, sección 1). Se usará el modo normal por ahora."
+                        "Esto funciona de forma más confiable corriendo la app en tu propia PC."
                     )
-                    usar_navegador = False
+                    results = []
                 else:
-                    from playwright_scraper import fetch_product_playwright
-            except ImportError:
-                st.error(
-                    "El modo navegador necesita Playwright instalado (revisa requirements.txt). "
-                    "Se usará el modo normal por ahora."
-                )
-                usar_navegador = False
+                    from playwright_scraper import batch_scrape_playwright
 
-        for i, url in enumerate(urls):
-            progress.progress(i / len(urls), text=f"Procesando link {i + 1} de {len(urls)}...")
-            if usar_navegador:
-                results.append(fetch_product_playwright(url))
-            else:
-                results.append(fetch_product(url))
-            if i < len(urls) - 1:
-                time.sleep(random.uniform(1.0, 2.0))
+                    def cb(done, total):
+                        progress.progress(done / total, text=f"Navegador: {done}/{total} links...")
 
-        progress.progress(1.0, text="¡Listo!")
+                    results = batch_scrape_playwright(urls, progress_callback=cb)
+                    progress.progress(1.0, text="¡Listo!")
+
+        else:  # automatico
+            progress.progress(0.1, text="Paso 1/2: intentando modo rápido para todos los links...")
+            results = batch_scrape(urls)
+
+            fallidos_idx = [i for i, r in enumerate(results) if r.estado != "ok"]
+
+            if fallidos_idx and necesita_navegador():
+                with st.spinner(
+                    f"{len(fallidos_idx)} link(s) necesitan navegador automatizado, preparando..."
+                ):
+                    ok, err = ensure_playwright_browser()
+
+                if ok:
+                    from playwright_scraper import batch_scrape_playwright
+
+                    urls_fallidos = [results[i].link for i in fallidos_idx]
+
+                    def cb(done, total):
+                        progress.progress(
+                            0.3 + 0.7 * (done / total),
+                            text=f"Paso 2/2: navegador para casos difíciles ({done}/{total})...",
+                        )
+
+                    reintentos = batch_scrape_playwright(urls_fallidos, progress_callback=cb)
+                    for idx, nuevo in zip(fallidos_idx, reintentos):
+                        results[idx] = merge_into(results[idx], nuevo)
+                else:
+                    st.info(
+                        f"No se pudo usar el navegador automatizado para reintentar "
+                        f"{len(fallidos_idx)} link(s) difíciles: {err}"
+                    )
+
+            progress.progress(1.0, text="¡Listo!")
+
         st.session_state["results"] = results
 
 results = st.session_state["results"]
@@ -129,7 +171,15 @@ if results:
     )
 
     ok_count = sum(1 for r in results if r.estado == "ok")
-    st.success(f"{ok_count} de {len(results)} productos procesados correctamente.")
+    incompletos_count = sum(1 for r in results if r.estado == "incompleto")
+    fallidos_count = len(results) - ok_count - incompletos_count
+
+    msg = f"{ok_count} de {len(results)} productos completos."
+    if incompletos_count:
+        msg += f" {incompletos_count} con algún campo faltante."
+    if fallidos_count:
+        msg += f" {fallidos_count} sin datos."
+    st.success(msg) if fallidos_count == 0 else st.warning(msg)
 
     st.subheader("Vista previa")
     for r in results:

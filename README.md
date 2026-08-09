@@ -58,7 +58,84 @@ Así puedes usarlo desde el celular o compartirlo, sin instalar nada en tu PC.
 
 ---
 
-## 3. Modo navegador automatizado (para links de "compartir", onelink o carritos)
+## 3. Búsqueda multi-región y completado de campos
+
+Cada producto se intenta extraer probando distintas "regiones" simuladas —
+primero **Estados Unidos**, y si falta algún dato, **Venezuela** — y el
+resultado final combina lo mejor de cada intento. Por ejemplo: si el intento
+con EE.UU. trae el nombre y el serial pero no el precio, y el intento con
+Venezuela sí trae el precio, el resultado final tendrá los tres datos
+completos.
+
+En la tabla de resultados vas a ver un campo **Estado**:
+- `ok` — se encontraron todos los datos esenciales (nombre, precio, serial, foto).
+- `incompleto` — se encontró algo, pero falta al menos un dato esencial
+  (se indica cuál en el mensaje de advertencia).
+- `sin_datos` / `error` — no se pudo extraer nada de ese link.
+
+### ⚠️ Importante sobre la simulación de región
+Shein decide la ubicación/catálogo que te muestra **principalmente por la IP**
+desde la que te conectas, no solo por el idioma o cookies del navegador. Lo
+que hace este scraper (mandar headers y cookies como si fueras de EE.UU. o
+Venezuela) es un intento razonable y puede ayudar en algunos casos, pero
+**no garantiza** el mismo resultado que tendrías navegando físicamente desde
+ese país.
+
+Si necesitas que sea 100% confiable, la forma correcta es usar un **proxy o
+VPN con IP real de ese país**. El código ya está preparado para esto: si
+defines las siguientes variables de entorno antes de correr la app, el
+scraper las usará automáticamente:
+
+```bash
+export SHEIN_PROXY_US="http://usuario:contraseña@ip-o-host-proxy-us:puerto"
+export SHEIN_PROXY_VE="http://usuario:contraseña@ip-o-host-proxy-ve:puerto"
+```
+
+- En Windows (PowerShell): `$env:SHEIN_PROXY_US="http://..."`
+- En Streamlit Community Cloud: ve a tu app → menú `⋮` → **Settings** →
+  **Secrets**, y agrega:
+  ```toml
+  SHEIN_PROXY_US = "http://usuario:contraseña@ip-proxy-us:puerto"
+  SHEIN_PROXY_VE = "http://usuario:contraseña@ip-proxy-ve:puerto"
+  ```
+  (si prefieres usar Secrets de Streamlit Cloud en vez de variables de
+  entorno normales, dime y te ayudo a ajustar el código para leerlos desde ahí).
+
+Si no configuras ningún proxy, el scraper igual intenta con headers/cookies
+como mejor esfuerzo — simplemente no es tan confiable como una IP real.
+
+---
+
+## 4. Mejoras de velocidad incluidas
+
+- **Modo rápido en paralelo**: en vez de procesar los links de uno en uno, ahora se
+  procesan hasta 6 al mismo tiempo. Con links normales, 20 productos deberían tardar
+  segundos en vez de minutos.
+- **Navegador reutilizado**: antes, el modo navegador abría y cerraba Chromium por cada
+  link (lo más lento posible). Ahora abre el navegador **una sola vez** por lote y lo
+  reutiliza para todos los links, solo abriendo una pestaña nueva por cada uno.
+- **Modo automático (por defecto)**: primero intenta el modo rápido para todos los
+  links; solo los que fallan (por ejemplo, links de "compartir" o `onelink`) se
+  reintentan con el navegador. Así la mayoría de tu lista sale rápido, y el modo lento
+  solo se usa cuando realmente hace falta.
+
+Puedes elegir el modo desde la interfaz:
+- **⚡ Automático (recomendado)** — la opción más rápida en la mayoría de los casos.
+- **🚀 Solo modo rápido** — el más veloz, pero falla con links de compartir/onelink/carrito.
+- **🐢 Forzar navegador para todos** — más lento, pero garantiza que todo pase por el
+  navegador (útil si sabes que todos tus links son de ese tipo).
+
+### Si aun así lo quieres más rápido
+- Baja la cantidad de links por tanda para no saturar la memoria del servidor gratuito.
+- En `scraper.py`, puedes subir `max_workers` (por defecto 6) en la función
+  `batch_scrape()` — pero ojo: subirlo demasiado aumenta el riesgo de que Shein bloquee
+  por exceso de peticiones simultáneas desde la misma IP.
+- Corriendo la app en tu PC (sección 1) siempre va a ser más rápido que en la nube
+  gratuita, porque no compites por CPU/memoria con otras apps del plan gratis.
+
+---
+
+## 5. Modo navegador automatizado (para links de "compartir", onelink o carritos)
 
 Los links normales de producto (`...-p-12345678.html`) suelen funcionar con el modo
 rápido (peticiones directas). Pero hay otro tipo de links que **no funcionan** con ese
@@ -94,7 +171,7 @@ playwright install --with-deps chromium
 
 ---
 
-## 4. Si Shein bloquea las peticiones (protección anti-bot)
+## 6. Si Shein bloquea las peticiones (protección anti-bot)
 
 Algunos sitios como Shein usan Cloudflare u otros sistemas que detectan que la petición
 no viene de un navegador real. Si notas que muchos links devuelven "sin datos":
@@ -106,7 +183,7 @@ no viene de un navegador real. Si notas que muchos links devuelven "sin datos":
 
 ---
 
-## 5. Sobre carritos con varios productos
+## 7. Sobre carritos con varios productos
 
 Si el link que pegas corresponde a un **carrito compartido** (varios productos en una
 sola página), por ahora el scraper está diseñado para leer **un producto por link**, así

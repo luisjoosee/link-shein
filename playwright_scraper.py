@@ -26,8 +26,15 @@ Requisitos (instalar una sola vez):
 import re
 from bs4 import BeautifulSoup
 
+import os
+from urllib.parse import urlparse
+
 from scraper import (
     ProductResult,
+    REGIONS,
+    CORE_FIELDS,
+    _is_complete,
+    _merge_results,
     _from_json_ld,
     _from_meta_tags,
     _from_embedded_json,
@@ -86,62 +93,54 @@ def _search_json_recursive(obj, found=None):
     return found
 
 
-def fetch_product_playwright(url: str, timeout_ms: int = 25000) -> ProductResult:
-    from playwright.sync_api import sync_playwright  # import diferido
-
+def _extract_from_page(context, url: str, timeout_ms: int) -> ProductResult:
+    """Abre una pestaña nueva en un contexto de navegador YA ABIERTO y extrae
+    los datos del producto. No abre ni cierra el navegador (eso lo hace quien
+    llama a esta función), lo cual es clave para procesar varios links rápido:
+    abrir un navegador nuevo por cada link es lo más lento del proceso."""
     result = ProductResult(link=url)
     captured_jsons = []
+    page = context.new_page()
+
+    def handle_response(response):
+        try:
+            ctype = response.headers.get("content-type", "")
+            if "application/json" in ctype:
+                captured_jsons.append(response.json())
+        except Exception:
+            pass
+
+    page.on("response", handle_response)
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                locale="es-ES",
-                viewport={"width": 1280, "height": 900},
-            )
-            page = context.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            # Esperamos un poco a que terminen llamadas AJAX típicas, sin
+            # bloquear tanto como "networkidle" (que a veces nunca se cumple
+            # por trackers/anuncios en segundo plano).
+            page.wait_for_timeout(1800)
+        except Exception:
+            pass
 
-            def handle_response(response):
-                try:
-                    ctype = response.headers.get("content-type", "")
-                    if "application/json" in ctype:
-                        captured_jsons.append(response.json())
-                except Exception:
-                    pass
-
-            page.on("response", handle_response)
-
+        for text in CONTINUE_BUTTON_TEXTS:
             try:
-                page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                locator = page.get_by_text(text, exact=False)
+                if locator.count() > 0:
+                    locator.first.click(timeout=1500)
+                    page.wait_for_timeout(1200)
+                    break
             except Exception:
-                # A veces networkidle nunca llega por trackers en segundo plano;
-                # seguimos igual con lo que haya cargado.
-                pass
+                continue
 
-            page.wait_for_timeout(1500)
-
-            for text in CONTINUE_BUTTON_TEXTS:
-                try:
-                    locator = page.get_by_text(text, exact=False)
-                    if locator.count() > 0:
-                        locator.first.click(timeout=2000)
-                        page.wait_for_timeout(1500)
-                        break
-                except Exception:
-                    continue
-
-            final_url = page.url
-            html = page.content()
-            browser.close()
-
+        final_url = page.url
+        html = page.content()
     except Exception as exc:
         result.estado = "error"
         result.detalle_error = f"Error con navegador automatizado: {exc}"
+        page.close()
         return result
+
+    page.close()
 
     merged = {}
     for data in captured_jsons:
@@ -178,10 +177,107 @@ def fetch_product_playwright(url: str, timeout_ms: int = 25000) -> ProductResult
     return result
 
 
-def batch_scrape_playwright(urls: list[str]) -> list[ProductResult]:
+def _root_domain(url: str) -> str:
+    host = urlparse(url).hostname or ""
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _new_context(browser, region: dict = None, url: str = ""):
+    """Crea un contexto nuevo (pestaña aislada con sus propias cookies) en un
+    navegador YA ABIERTO. Si se pasa `region`, aplica headers/cookies/proxy
+    para simular esa ubicación."""
+    proxy = None
+    if region:
+        proxy_url = os.environ.get(region["proxy_env"])
+        if proxy_url:
+            proxy = {"server": proxy_url}
+
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        locale="en-US" if region and region["code"] == "US" else "es-ES",
+        viewport={"width": 1280, "height": 900},
+        extra_http_headers={"Accept-Language": region["accept_language"]} if region else {},
+        proxy=proxy,
+    )
+
+    if region and url:
+        domain = _root_domain(url)
+        try:
+            context.add_cookies(
+                [
+                    {"name": k, "value": v, "domain": domain, "path": "/"}
+                    for k, v in region["cookies"].items()
+                ]
+            )
+        except Exception:
+            pass  # si el dominio no es válido para cookies, seguimos sin ellas
+
+    return context
+
+
+def fetch_product_playwright(url: str, timeout_ms: int = 25000) -> ProductResult:
+    """Extrae un producto probando distintas regiones (EE.UU., Venezuela) con
+    el navegador automatizado, combinando los campos que cada intento logre
+    traer. Para varios links de una vez, usa batch_scrape_playwright."""
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            intentos = []
+            for region in REGIONS:
+                context = _new_context(browser, region=region, url=url)
+                r = _extract_from_page(context, url, timeout_ms)
+                r._region_code = region["code"]
+                context.close()
+                intentos.append(r)
+                if _is_complete(r):
+                    break
+            browser.close()
+            return _merge_results(intentos)
+    except Exception as exc:
+        return ProductResult(
+            link=url, estado="error", detalle_error=f"Error con navegador automatizado: {exc}"
+        )
+
+
+def batch_scrape_playwright(
+    urls: list[str], timeout_ms: int = 25000, progress_callback=None
+) -> list[ProductResult]:
+    """Procesa varios links reutilizando UN SOLO navegador (mucho más rápido
+    que abrir uno nuevo por cada link). Para cada link prueba las regiones
+    definidas en scraper.REGIONS y combina los campos obtenidos.
+    progress_callback(hecho, total) es opcional, para la barra de progreso."""
+    from playwright.sync_api import sync_playwright
+
+    clean_urls = [u.strip() for u in urls if u.strip()]
     results = []
-    for url in urls:
-        url = url.strip()
-        if url:
-            results.append(fetch_product_playwright(url))
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            for i, url in enumerate(clean_urls):
+                intentos = []
+                for region in REGIONS:
+                    context = _new_context(browser, region=region, url=url)
+                    r = _extract_from_page(context, url, timeout_ms)
+                    r._region_code = region["code"]
+                    context.close()
+                    intentos.append(r)
+                    if _is_complete(r):
+                        break
+                results.append(_merge_results(intentos))
+                if progress_callback:
+                    progress_callback(i + 1, len(clean_urls))
+            browser.close()
+    except Exception as exc:
+        for url in clean_urls[len(results):]:
+            results.append(
+                ProductResult(link=url, estado="error", detalle_error=str(exc))
+            )
+
     return results
