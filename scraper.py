@@ -1,0 +1,214 @@
+"""
+scraper.py
+Lógica para extraer nombre, precio, tallas, SKU/serial y foto
+a partir de un link de producto de Shein.
+
+Estrategia (en orden de prioridad):
+1. Buscar bloque JSON-LD (<script type="application/ld+json">) con schema.org Product.
+2. Buscar meta tags Open Graph (og:title, og:image, product:price:amount).
+3. Buscar JSON "crudo" embebido en el HTML (los sitios tipo Shein suelen incrustar
+   los datos del producto en un <script> como variable JS, ej: window.gbRawData = {...}).
+   Se usa regex tolerante a errores para sacar claves comunes: goods_sn, goods_img,
+   goods_name, salePrice/retailPrice, size.
+4. Como último recurso, se usa el <title> de la página como nombre.
+
+Nota: Shein puede bloquear peticiones automatizadas (Cloudflare / JS challenge).
+Si un link devuelve datos vacíos, probablemente el sitio bloqueó la petición;
+revisa el README para la alternativa con navegador (Playwright).
+"""
+
+import re
+import json
+import random
+import time
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
+
+import requests
+from bs4 import BeautifulSoup
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+]
+
+
+@dataclass
+class ProductResult:
+    link: str
+    nombre: str = ""
+    precio: str = ""
+    tallas: str = ""
+    serial: str = ""
+    foto_url: str = ""
+    estado: str = "ok"
+    detalle_error: str = ""
+
+
+def _headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Referer": "https://www.google.com/",
+    }
+
+
+def _goods_id_from_url(url: str) -> str:
+    """Intenta sacar el ID del producto de la URL como fallback de serial."""
+    m = re.search(r"-p-(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"goods_id=(\d+)", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _from_json_ld(soup: BeautifulSoup) -> dict:
+    data = {}
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            payload = json.loads(script.string or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        candidates = payload if isinstance(payload, list) else [payload]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            if item.get("@type") == "Product" or "offers" in item:
+                if item.get("name"):
+                    data["nombre"] = item["name"]
+                if item.get("sku"):
+                    data["serial"] = str(item["sku"])
+                image = item.get("image")
+                if isinstance(image, list) and image:
+                    data["foto_url"] = image[0]
+                elif isinstance(image, str):
+                    data["foto_url"] = image
+                offers = item.get("offers")
+                if isinstance(offers, dict):
+                    price = offers.get("price")
+                    currency = offers.get("priceCurrency", "")
+                    if price:
+                        data["precio"] = f"{price} {currency}".strip()
+                elif isinstance(offers, list) and offers:
+                    price = offers[0].get("price")
+                    currency = offers[0].get("priceCurrency", "")
+                    if price:
+                        data["precio"] = f"{price} {currency}".strip()
+    return data
+
+
+def _from_meta_tags(soup: BeautifulSoup) -> dict:
+    data = {}
+    mapping = {
+        "og:title": "nombre",
+        "og:image": "foto_url",
+        "product:price:amount": "precio",
+    }
+    for prop, key in mapping.items():
+        tag = soup.find("meta", {"property": prop})
+        if tag and tag.get("content"):
+            data[key] = tag["content"]
+    return data
+
+
+def _from_embedded_json(html: str) -> dict:
+    data = {}
+
+    patterns = {
+        "nombre": r'"goods_name"\s*:\s*"([^"]+)"',
+        "serial": r'"goods_sn"\s*:\s*"([^"]+)"',
+        "foto_url": r'"goods_img"\s*:\s*"([^"]+)"',
+        "precio_sale": r'"salePrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+        "precio_retail": r'"retailPrice"\s*:\s*\{[^}]*?"amountWithSymbol"\s*:\s*"([^"]+)"',
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, html)
+        if m:
+            data[key] = m.group(1)
+
+    if "precio_sale" in data:
+        data["precio"] = data.pop("precio_sale")
+        data.pop("precio_retail", None)
+    elif "precio_retail" in data:
+        data["precio"] = data.pop("precio_retail")
+
+    tallas = sorted(set(re.findall(r'"attr_value_name"\s*:\s*"([^"]+)"', html)))
+    # Filtra ruidos comunes que no son tallas (colores, etc. se cuelan a veces)
+    if tallas:
+        data["tallas"] = ", ".join(tallas[:15])
+
+    if data.get("foto_url", "").startswith("//"):
+        data["foto_url"] = "https:" + data["foto_url"]
+
+    return data
+
+
+def fetch_product(url: str, timeout: int = 15) -> ProductResult:
+    result = ProductResult(link=url)
+    try:
+        resp = requests.get(url, headers=_headers(), timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        result.estado = "error"
+        result.detalle_error = f"No se pudo descargar la página: {exc}"
+        return result
+
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    merged = {}
+    merged.update(_from_meta_tags(soup))
+    merged.update(_from_json_ld(soup))          # JSON-LD tiene prioridad
+    embedded = _from_embedded_json(html)
+    for k, v in embedded.items():
+        merged.setdefault(k, v)
+
+    if not merged.get("nombre") and soup.title:
+        merged["nombre"] = soup.title.get_text(strip=True)
+
+    if not merged.get("serial"):
+        merged["serial"] = _goods_id_from_url(url)
+
+    result.nombre = merged.get("nombre", "")
+    result.precio = merged.get("precio", "")
+    result.tallas = merged.get("tallas", "")
+    result.serial = merged.get("serial", "")
+    result.foto_url = merged.get("foto_url", "")
+
+    if not any([result.nombre, result.precio, result.foto_url]):
+        result.estado = "sin_datos"
+        result.detalle_error = (
+            "La página respondió pero no se encontraron datos reconocibles "
+            "(posible bloqueo anti-bot o cambio de estructura del sitio)."
+        )
+
+    return result
+
+
+def batch_scrape(urls: list[str], delay_range=(1.0, 2.5)) -> list[ProductResult]:
+    """Procesa una lista de links de forma secuencial con pequeñas pausas
+    para reducir el riesgo de bloqueo por parte del sitio."""
+    results = []
+    for i, url in enumerate(urls):
+        url = url.strip()
+        if not url:
+            continue
+        results.append(fetch_product(url))
+        if i < len(urls) - 1:
+            time.sleep(random.uniform(*delay_range))
+    return results
+
+
+def is_shein_url(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return "shein" in host
