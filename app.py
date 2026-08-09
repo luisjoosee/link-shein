@@ -1,5 +1,7 @@
 import io
 import zipfile
+import subprocess
+import sys
 
 import pandas as pd
 import requests
@@ -8,6 +10,25 @@ import streamlit as st
 from scraper import batch_scrape, is_shein_url
 
 st.set_page_config(page_title="Extractor de productos Shein", page_icon="🛍️", layout="wide")
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_playwright_browser():
+    """Descarga el navegador Chromium para Playwright una sola vez.
+    Necesario porque en Streamlit Cloud no hay forma de correrlo manualmente
+    como en una PC local."""
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
 
 st.title("🛍️ Extractor de productos Shein")
 st.caption(
@@ -24,6 +45,12 @@ with st.expander("⚠️ Aviso importante", expanded=False):
 
 default_placeholder = "https://www.shein.com/...-p-12345678.html\nhttps://www.shein.com/...-p-87654321.html"
 links_text = st.text_area("Links de producto", height=180, placeholder=default_placeholder)
+
+usar_navegador = st.checkbox(
+    "🐢 Usar navegador automatizado (más lento, pero necesario para links de "
+    "'compartir', 'onelink.shein.com' o carritos compartidos)",
+    value=False,
+)
 
 col1, col2 = st.columns([1, 5])
 with col1:
@@ -48,14 +75,35 @@ if run:
 
         progress = st.progress(0, text="Iniciando...")
         results = []
-
-        # Procesamos uno por uno para poder actualizar la barra de progreso
-        from scraper import fetch_product
         import time, random
+        from scraper import fetch_product
+
+        if usar_navegador:
+            try:
+                with st.spinner("Preparando navegador automatizado (solo la primera vez, puede tardar 1-2 min)..."):
+                    ok, err = ensure_playwright_browser()
+                if not ok:
+                    st.error(
+                        f"No se pudo preparar el navegador automatizado en este servidor: {err}\n\n"
+                        "Este modo funciona de forma más confiable corriendo la app en tu propia PC "
+                        "(ver README, sección 1). Se usará el modo normal por ahora."
+                    )
+                    usar_navegador = False
+                else:
+                    from playwright_scraper import fetch_product_playwright
+            except ImportError:
+                st.error(
+                    "El modo navegador necesita Playwright instalado (revisa requirements.txt). "
+                    "Se usará el modo normal por ahora."
+                )
+                usar_navegador = False
 
         for i, url in enumerate(urls):
-            progress.progress((i) / len(urls), text=f"Procesando link {i + 1} de {len(urls)}...")
-            results.append(fetch_product(url))
+            progress.progress(i / len(urls), text=f"Procesando link {i + 1} de {len(urls)}...")
+            if usar_navegador:
+                results.append(fetch_product_playwright(url))
+            else:
+                results.append(fetch_product(url))
             if i < len(urls) - 1:
                 time.sleep(random.uniform(1.0, 2.0))
 
