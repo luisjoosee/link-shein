@@ -346,3 +346,23 @@ def is_shein_url(url: str) -> bool:
     except Exception:
         return False
     return "shein" in host
+
+
+def build_url_from_serial(serial: str, domain: str = "us.shein.com") -> str:
+    """Arma un link directo de producto a partir de solo el serial/ID
+    numérico (el número que aparece después de '-p-' en cualquier link de
+    Shein). El texto del nombre en la URL es decorativo: Shein reconoce el
+    producto solo con el número y redirige a la página completa igual.
+
+    Nota: esto trae el producto con su talla/color POR DEFECTO (la primera
+    opción), no necesariamente la variante exacta que alguien tenía elegida
+    al compartir el link original."""
+    serial = serial.strip()
+    return f"https://{domain}/producto-p-{serial}.html"
+
+
+def is_probably_serial(text: str) -> bool:
+    """True si el texto parece ser solo un ID numérico de producto (serial),
+    en vez de un link completo."""
+    text = text.strip()
+    return text.isdigit() and 5 <= len(text) <= 12

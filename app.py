@@ -7,7 +7,13 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from scraper import batch_scrape, is_shein_url, merge_into
+from scraper import (
+    batch_scrape,
+    is_shein_url,
+    merge_into,
+    build_url_from_serial,
+    is_probably_serial,
+)
 
 st.set_page_config(page_title="Extractor de productos Shein", page_icon="🛍️", layout="wide")
 
@@ -94,8 +100,23 @@ with st.expander("🔧 Modo diagnóstico (si el precio/talla/color no salen)", e
                             "aquí en el chat para que se pueda revisar la estructura real."
                         )
 
-default_placeholder = "https://www.shein.com/...-p-12345678.html\nhttps://www.shein.com/...-p-87654321.html"
-links_text = st.text_area("Links de producto", height=180, placeholder=default_placeholder)
+default_placeholder = (
+    "https://www.shein.com/...-p-12345678.html\n"
+    "https://www.shein.com/...-p-87654321.html\n"
+    "221263471   (también puedes pegar solo el serial/ID numérico)"
+)
+links_text = st.text_area(
+    "Links o seriales de producto (uno por línea, se pueden mezclar)",
+    height=180,
+    placeholder=default_placeholder,
+)
+
+region_serial = st.selectbox(
+    "Si pegas solo seriales, ¿desde qué sitio de Shein armar el link?",
+    options=["us.shein.com", "www.shein.com"],
+    index=0,
+    help="Solo aplica a líneas que sean un serial/ID numérico, no a links completos.",
+)
 
 usar_navegador = st.radio(
     "Modo de extracción",
@@ -108,6 +129,15 @@ usar_navegador = st.radio(
     index=0,
 )
 
+modo_visible = False
+if usar_navegador in ("automatico", "navegador"):
+    modo_visible = st.checkbox(
+        "🖥️ Modo visible (SOLO funciona corriendo la app en tu PC, no en la nube): "
+        "si Shein muestra un CAPTCHA, se abre una ventana para que lo resuelvas a "
+        "mano y el proceso continúa solo.",
+        value=False,
+    )
+
 col1, col2 = st.columns([1, 5])
 with col1:
     run = st.button("🔍 Extraer datos", type="primary")
@@ -116,12 +146,28 @@ if "results" not in st.session_state:
     st.session_state["results"] = []
 
 if run:
-    urls = [u.strip() for u in links_text.splitlines() if u.strip()]
-    urls = urls[:20]  # límite de seguridad
+    entradas = [u.strip() for u in links_text.splitlines() if u.strip()]
+    entradas = entradas[:20]  # límite de seguridad
 
-    if not urls:
-        st.warning("Pega al menos un link.")
+    if not entradas:
+        st.warning("Pega al menos un link o serial.")
     else:
+        urls = []
+        seriales_convertidos = 0
+        for entrada in entradas:
+            if is_probably_serial(entrada):
+                urls.append(build_url_from_serial(entrada, domain=region_serial))
+                seriales_convertidos += 1
+            else:
+                urls.append(entrada)
+
+        if seriales_convertidos:
+            st.info(
+                f"{seriales_convertidos} serial(es) convertido(s) a link directo. "
+                "Recuerda: esto trae la talla/color POR DEFECTO del producto, no "
+                "necesariamente una variante específica."
+            )
+
         no_shein = [u for u in urls if not is_shein_url(u)]
         if no_shein:
             st.info(
@@ -164,7 +210,9 @@ if run:
                     def cb(done, total):
                         progress.progress(done / total, text=f"Navegador: {done}/{total} links...")
 
-                    results = batch_scrape_playwright(urls, progress_callback=cb)
+                    results = batch_scrape_playwright(
+                        urls, progress_callback=cb, headless=not modo_visible
+                    )
                     progress.progress(1.0, text="¡Listo!")
 
         else:  # automatico
@@ -190,7 +238,9 @@ if run:
                             text=f"Paso 2/2: navegador para casos difíciles ({done}/{total})...",
                         )
 
-                    reintentos = batch_scrape_playwright(urls_fallidos, progress_callback=cb)
+                    reintentos = batch_scrape_playwright(
+                        urls_fallidos, progress_callback=cb, headless=not modo_visible
+                    )
                     for idx, nuevo in zip(fallidos_idx, reintentos):
                         results[idx] = merge_into(results[idx], nuevo)
                 else:
@@ -224,17 +274,27 @@ if results:
 
     ok_count = sum(1 for r in results if r.estado == "ok")
     incompletos_count = sum(1 for r in results if r.estado == "incompleto")
-    fallidos_count = len(results) - ok_count - incompletos_count
+    captcha_count = sum(1 for r in results if r.estado == "bloqueado_captcha")
+    fallidos_count = len(results) - ok_count - incompletos_count - captcha_count
 
     msg = f"{ok_count} de {len(results)} productos completos."
     if incompletos_count:
         msg += f" {incompletos_count} con algún campo faltante."
+    if captcha_count:
+        msg += f" {captcha_count} bloqueados por CAPTCHA de Shein."
     if fallidos_count:
         msg += f" {fallidos_count} sin datos."
-    if fallidos_count == 0:
+    if fallidos_count == 0 and captcha_count == 0:
         st.success(msg)
     else:
         st.warning(msg)
+
+    if captcha_count:
+        st.info(
+            "💡 Los productos bloqueados por CAPTCHA se resuelven usando el link "
+            "**directo del producto** (no de compartir/onelink), o activando el "
+            "**modo visible** para resolverlo a mano corriendo la app en tu PC."
+        )
 
     st.subheader("Vista previa")
     for r in results:
